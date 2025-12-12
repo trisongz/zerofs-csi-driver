@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fio-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: zerofs-test
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fio-benchmark
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: fio
+    image: xinnux/fio
+    command: ["fio"]
+    args:
+    - "--name=benchtest"
+    - "--size=512m"
+    - "--filename=/data/testfile"
+    - "--rw=randrw"
+    - "--rwmixread=50"
+    - "--bs=4k"
+    - "--direct=1"
+    - "--numjobs=1"
+    - "--time_based"
+    - "--runtime=30"
+    - "--group_reporting"
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: fio-pvc

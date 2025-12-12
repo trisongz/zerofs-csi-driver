@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerofs-csi-controller
+  namespace: zerofs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zerofs-csi-controller
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: zerofs-csi-controller
+    spec:
+      containers:
+        - args:
+            - --controller
+          image: halceon/zerofs-csi-driver:latest
+          imagePullPolicy: Never
+          name: zerofs-csi-controller
+          env:
+            - name: METRICS_BIND_ADDRESS
+              value: ":8089"
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins/zerofs.csi.driver
+              name: socket
+        - args:
+            - --csi-address=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+            - --extra-create-metadata
+            - --feature-gates=Topology=false
+            - --v=5
+            - --leader-election
+            - --metrics-address=:9090
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+          name: external-provisioner
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins/zerofs.csi.driver
+              name: socket
+        - args:
+            - --csi-address=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+            - --v=5
+            - --leader-election
+            - --metrics-address=:9091
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.8.0
+          name: external-attacher
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins/zerofs.csi.driver
+              name: socket
+      serviceAccountName: zerofs-csi-driver
+      volumes:
+        - emptyDir: {}
+          name: socket
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zerofs-csi-node
+  namespace: zerofs
+spec:
+  selector:
+    matchLabels:
+      app: zerofs-csi-node
+  template:
+    metadata:
+      labels:
+        app: zerofs-csi-node
+    spec:
+      containers:
+        - args:
+            - --node
+          image: halceon/zerofs-csi-driver:latest
+          imagePullPolicy: Never
+          name: zerofs-csi-node
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins/zerofs.csi.driver
+              mountPropagation: Bidirectional
+              name: plugin-dir
+            - mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+              name: pod-mount-dir
+        - args:
+            - --csi-address=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+            - --v=5
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+          name: node-driver-registrar
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins/zerofs.csi.driver
+              name: plugin-dir
+            - mountPath: /registration
+              name: registration-dir
+      # Removed initContainer as it was causing issues in k3d
+      serviceAccountName: zerofs-csi-driver
+      volumes:
+        - hostPath:
+            path: /var/lib/kubelet/pods
+            type: DirectoryOrCreate
+          name: pod-mount-dir
+        - hostPath:
+            path: /var/lib/kubelet/plugins/zerofs.csi.driver
+            type: DirectoryOrCreate
+          name: plugin-dir
+        - hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: DirectoryOrCreate
+          name: registration-dir
+        - hostPath:
+            path: /lib/modules
+            type: Directory
+          name: lib-modules-dir
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 100%

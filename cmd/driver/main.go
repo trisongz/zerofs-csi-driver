@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
@@ -20,10 +21,19 @@ func main() {
 	enableNode := flag.Bool("node", false, "Enable the CSI Node server")
 	zerofsNamespace := flag.String("namespace", "zerofs", "Kubernetes namespace for ZeroFS pods")
 
+	defaultMetricsAddr := ":8080"
+	if v := os.Getenv("METRICS_BIND_ADDRESS"); v != "" {
+		defaultMetricsAddr = v
+	}
+	metricsAddr := flag.String("metrics-bind-address", defaultMetricsAddr, "The address the metric endpoint binds to.")
+
 	flag.Parse()
 
 	config := ctrl.GetConfigOrDie()
 	mgrOptions := ctrl.Options{
+		Metrics: server.Options{
+			BindAddress: *metricsAddr,
+		},
 		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
 			// Set default namespace for internal resources
 			opts.DefaultNamespaces = map[string]cache.Config{

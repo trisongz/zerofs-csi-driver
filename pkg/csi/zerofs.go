@@ -110,6 +110,15 @@ access_key_id = "{{.AWSAccessKeyID}}"
 default_region = "{{.AWSDefaultRegion}}"
 allow_http = "{{.AWSAllowHTTP}}"
 endpoint = "{{.AWSEndpoint}}"
+
+[lsm]
+l0_max_ssts = {{.LsmL0MaxSsts}}
+max_unflushed_gb = {{.LsmMaxUnflushedGB}}
+max_concurrent_compactions = {{.LsmMaxConcurrentCompactions}}
+flush_interval_secs = {{.LsmFlushIntervalSecs}}
+
+[filesystem]
+max_size_gb = {{.FilesystemMaxSizeGB}}
 `
 
 	// Parse the template
@@ -119,18 +128,23 @@ endpoint = "{{.AWSEndpoint}}"
 	}
 
 	configValues := map[string]any{
-		"VolumeID":           volumeID,
-		"BaseDir":            ZeroFSBaseDir,
-		"CacheDir":           cmp.Or(configMapData["cacheDir"], "/tmp"),
-		"CacheDiskSizeGB":    cmp.Or(configMapData["cacheDiskSizeGB"], "1.0"),
-		"CacheMemorySizeGB":  cmp.Or(configMapData["cacheMemorySizeGB"], "1.0"),
-		"StorageURL":         fmt.Sprintf("%s/%s", cmp.Or(configMapData["storageURL"], "s3://zerofs"), volumeID),
-		"EncryptionPassword": encryptionPassword,
-		"AWSAccessKeyID":     awsAccessKeyID,
-		"AWSSecretAccessKey": awsSecretAccessKey,
-		"AWSDefaultRegion":   configMapData["awsDefaultRegion"],
-		"AWSAllowHTTP":       configMapData["awsAllowHTTP"],
-		"AWSEndpoint":        configMapData["awsEndpoint"],
+		"VolumeID":                    volumeID,
+		"BaseDir":                     ZeroFSBaseDir,
+		"CacheDir":                    cmp.Or(configMapData["cacheDir"], "/tmp"),
+		"CacheDiskSizeGB":             cmp.Or(configMapData["cacheDiskSizeGB"], "1.0"),
+		"CacheMemorySizeGB":           cmp.Or(configMapData["cacheMemorySizeGB"], "1.0"),
+		"StorageURL":                  fmt.Sprintf("%s/%s", cmp.Or(configMapData["storageURL"], "s3://zerofs"), volumeID),
+		"EncryptionPassword":          encryptionPassword,
+		"AWSAccessKeyID":              awsAccessKeyID,
+		"AWSSecretAccessKey":          awsSecretAccessKey,
+		"AWSDefaultRegion":            configMapData["awsDefaultRegion"],
+		"AWSAllowHTTP":                configMapData["awsAllowHTTP"],
+		"AWSEndpoint":                 configMapData["awsEndpoint"],
+		"LsmL0MaxSsts":                cmp.Or(configMapData["lsmL0MaxSsts"], "16"),
+		"LsmMaxUnflushedGB":           cmp.Or(configMapData["lsmMaxUnflushedGB"], "1.0"),
+		"LsmMaxConcurrentCompactions": cmp.Or(configMapData["lsmMaxConcurrentCompactions"], "8"),
+		"LsmFlushIntervalSecs":        cmp.Or(configMapData["lsmFlushIntervalSecs"], "30"),
+		"FilesystemMaxSizeGB":         cmp.Or(configMapData["filesystemMaxSizeGB"], "100.0"),
 	}
 
 	// Execute the template
@@ -196,7 +210,8 @@ endpoint = "{{.AWSEndpoint}}"
 			},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: nodeName,
+			NodeName:                      nodeName,
+			TerminationGracePeriodSeconds: ptr.To(int64(60)),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:  ptr.To(int64(0)),
 				RunAsGroup: ptr.To(int64(0)),

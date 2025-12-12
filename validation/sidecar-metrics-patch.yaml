@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerofs-csi-controller
+  namespace: zerofs
+spec:
+  template:
+    spec:
+      containers:
+      - name: external-provisioner
+        args:
+        - --csi-address=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+        - --extra-create-metadata
+        - --feature-gates=Topology=false
+        - --v=5
+        - --leader-election
+        - --metrics-address=:9090
+      - name: external-attacher
+        args:
+        - --csi-address=/var/lib/kubelet/plugins/zerofs.csi.driver/csi.sock
+        - --v=5
+        - --leader-election
+        - --metrics-address=:9091

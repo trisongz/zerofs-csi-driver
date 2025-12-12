@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerofs-csi-controller
+  namespace: zerofs
+spec:
+  template:
+    spec:
+      containers:
+      - name: zerofs-csi-driver
+        image: halceon/zerofs-csi-driver:latest
+        imagePullPolicy: Never
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zerofs-csi-node
+  namespace: zerofs
+spec:
+  template:
+    spec:
+      containers:
+      - name: zerofs-csi-driver
+        image: halceon/zerofs-csi-driver:latest
+        imagePullPolicy: Never

@@ -243,8 +243,12 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		cmd = exec.Command("mkfs", "-t", filesystem, nbdDevicePath)
 		output, err = cmd.CombinedOutput()
 		if err != nil {
-			ns.logger.Errorf("Failed to format NBD device %s with filesystem %s: %v, output: %s",
-				nbdDevicePath, filesystem, err, string(output))
+			// Cleanup NBD device on failure
+			ns.logger.Errorf("Failed to format NBD device %s: %v, output: %s. Disconnecting NBD...", nbdDevicePath, err, string(output))
+			cleanupCmd := exec.Command("nbd-client", "-d", nbdDevicePath)
+			if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
+				ns.logger.Warnf("Failed to disconnect NBD device %s during cleanup: %v", nbdDevicePath, cleanupErr)
+			}
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to format NBD device: %v", err))
 		}
 		ns.logger.Infof("Successfully formatted NBD device %s with filesystem %s", nbdDevicePath, filesystem)
@@ -272,7 +276,12 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	cmd = exec.Command("mount", mountArgs...)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
-		ns.logger.Errorf("Failed to mount NBD device %s to %s: %v, output: %s", nbdDevicePath, req.TargetPath, err, string(output))
+		// Cleanup NBD device on failure
+		ns.logger.Errorf("Failed to mount NBD device %s to %s: %v, output: %s. Disconnecting NBD...", nbdDevicePath, req.TargetPath, err, string(output))
+		cleanupCmd := exec.Command("nbd-client", "-d", nbdDevicePath)
+		if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
+			ns.logger.Warnf("Failed to disconnect NBD device %s during cleanup: %v", nbdDevicePath, cleanupErr)
+		}
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to mount NBD device: %v", err))
 	}
 
@@ -305,26 +314,51 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	}
 
 	// Determine which nbd block device this volume is using so we can detach it after unmounting
+	var nbdDevice string
+
+	// First try to find it via findmnt
 	cmd := exec.Command("findmnt", "-n", "-o", "SOURCE", req.TargetPath)
-	nbdDevice, err := cmd.CombinedOutput()
-	if err != nil {
-		ns.logger.Warnf("Failed to find volume mount for %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(nbdDevice))
+	output, err := cmd.CombinedOutput()
+	if err == nil && len(output) > 0 {
+		nbdDevice = strings.TrimSpace(string(output))
+	} else {
+		ns.logger.Warnf("Failed to find volume mount context for %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
 	}
 
-	// Unmount the filesystem
+	// Unmount the filesystem (always attempt unmount, even if findmnt failed)
 	ns.logger.Infof("Unmounting volume %s from %s", req.VolumeId, req.TargetPath)
 	cmd = exec.Command("umount", req.TargetPath)
-	output, err := cmd.CombinedOutput()
+	output, err = cmd.CombinedOutput()
 	if err != nil {
-		ns.logger.Warnf("Failed to unmount volume %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
+		// verify if it is actually unmounted
+		if strings.Contains(string(output), "not mounted") {
+			ns.logger.Infof("Volume %s already unmounted from %s", req.VolumeId, req.TargetPath)
+		} else {
+			ns.logger.Warnf("Failed to unmount volume %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
+		}
+	}
+
+	// Check /run/zerofs-csi/ for the NBD device if findmnt didn't return it
+	nbdDeviceFilePath := filepath.Join(ZeroFSRunDir, req.VolumeId)
+	if nbdDevice == "" {
+		if nbdDeviceBytes, err := os.ReadFile(nbdDeviceFilePath); err == nil {
+			nbdDevice = string(nbdDeviceBytes)
+			ns.logger.Infof("Recovered NBD device %s from state file for volume %s", nbdDevice, req.VolumeId)
+		} else {
+			ns.logger.Warnf("Could not determine NBD device for volume %s (findmnt failed and state file missing/unreadable)", req.VolumeId)
+		}
 	}
 
 	// Remove the nbd-client device
-	ns.logger.Infof("Detaching volume %s from %s", req.VolumeId, nbdDevice)
-	cmd = exec.Command("nbd-client", "-d", strings.TrimSpace(string(nbdDevice)))
-	_, err = cmd.CombinedOutput()
-	if err != nil {
-		ns.logger.Warnf("Failed to detach nbd for volume %s: %v", req.VolumeId, err)
+	if nbdDevice != "" {
+		ns.logger.Infof("Detaching volume %s from %s", req.VolumeId, nbdDevice)
+		cmd = exec.Command("nbd-client", "-d", nbdDevice)
+		_, err = cmd.CombinedOutput()
+		if err != nil {
+			ns.logger.Warnf("Failed to detach nbd for volume %s: %v", req.VolumeId, err)
+		}
+	} else {
+		ns.logger.Warnf("Skipping NBD detach for volume %s as device could not be determined", req.VolumeId)
 	}
 
 	// Remove pod for the zerofs server
@@ -342,7 +376,7 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	}
 
 	// Remove the tracking file from /run/zerofs-csi/
-	nbdDeviceFilePath := filepath.Join(ZeroFSRunDir, req.VolumeId)
+	nbdDeviceFilePath = filepath.Join(ZeroFSRunDir, req.VolumeId)
 	if _, err := os.Stat(nbdDeviceFilePath); err == nil {
 		if removeErr := os.Remove(nbdDeviceFilePath); removeErr != nil {
 			ns.logger.Warnf("Failed to remove NBD device file for volume %s: %v", req.VolumeId, removeErr)
