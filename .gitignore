@@ -10,3 +10,6 @@ validation-logs.txt
 fio-*-output*.txt
 *bench-output.csv
 *bench-external-output.csv
+
+# MkDocs build output
+site/

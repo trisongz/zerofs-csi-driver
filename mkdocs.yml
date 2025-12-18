@@ -1,0 +1,43 @@
+site_name: ZeroFS CSI Driver
+site_description: Kubernetes CSI driver for ZeroFS (S3-backed block storage)
+site_url: https://trisongz.github.io/zerofs-csi-driver/
+repo_url: https://github.com/trisongz/zerofs-csi-driver
+repo_name: trisongz/zerofs-csi-driver
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: slate
+      primary: blue
+      accent: cyan
+
+nav:
+  - Overview: index.md
+  - Getting Started: getting-started.md
+  - Architecture: architecture.md
+  - Configuration: configuration.md
+  - Validation & Benchmarks: benchmarks.md
+  - Operations: operations.md
+  - CI & Releases: ci.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+extra_css:
+  - stylesheets/extra.css

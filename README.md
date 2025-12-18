@@ -4,6 +4,10 @@ A Container Storage Interface (CSI) driver for [ZeroFS](https://www.zerofs.net/)
 
 ZeroFS does all the work translating I/O to S3/SlateDB. This CSI driver is only managing the lifecycle of the ZeroFS processes, data, and mounts.
 
+## Documentation
+
+Project docs are published to GitHub Pages: https://trisongz.github.io/zerofs-csi-driver/
+
 ## Notes
 
 This software is under heavy active development. Expect breaking changes. Do not store data in here that isn't backed up elsewhere. I'll do my best to tag releases at stable commits that I'm using and release migration notes when necessary.
