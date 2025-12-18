@@ -35,6 +35,14 @@ build:
 	docker push $(IMAGE_NAME)
 	@echo "Docker image '$(IMAGE_NAME)' built and pushed (linux/$(ARCH))."
 
+.PHONY: build-local
+build-local:
+	@echo "Building Go binary for linux/$(ARCH)..."
+	GOOS=linux GOARCH=$(ARCH) CGO_ENABLED=0 go build -v -o out/zerofs-csi-driver-linux-$(ARCH) ./cmd/driver
+	@echo "Building Docker image '$(IMAGE_NAME)' (local load, no push)..."
+	docker buildx build --builder default --platform linux/$(ARCH) --load -t $(IMAGE_NAME) -f Dockerfile .
+	@echo "Docker image '$(IMAGE_NAME)' built (linux/$(ARCH))."
+
 .PHONY: deploy
 deploy:
 	@echo "Importing image '$(IMAGE_NAME)' into cluster..."
@@ -134,6 +142,15 @@ logs:
 	-kubectl describe job zerofs-bench-external -n default >> validation-logs.txt 2>&1
 	-kubectl logs -n default job/zerofs-bench-external >> validation-logs.txt 2>&1
 	@echo "Logs exported to validation-logs.txt"
+
+.PHONY: nbd-regression
+nbd-regression:
+	@echo "Running NBD leak regression (ITERATIONS=$(ITERATIONS), CHAOS=$(CHAOS))..."
+	@bash hack/nbd_regression.sh
+
+.PHONY: nbd-regression-chaos
+nbd-regression-chaos:
+	@$(MAKE) nbd-regression CHAOS=1
 
 .PHONY: teardown
 teardown:
