@@ -235,4 +235,3 @@ func mustReadFile(path string) []byte {
 	b, _ := os.ReadFile(path)
 	return b
 }
-

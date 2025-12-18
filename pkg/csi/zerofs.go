@@ -176,6 +176,8 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 		m.logger.Infof("Created Secret %s for volume %s", secretName, volumeID)
 	} else {
 		// If found, update it
+		secret.ResourceVersion = existingSecret.ResourceVersion
+		secret.Type = existingSecret.Type
 		if err := m.client.Update(ctx, secret); err != nil {
 			return fmt.Errorf("failed to update secret: %w", err)
 		}
@@ -185,10 +187,20 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 	// Create a pod manifest for the zerofs
 	podName := fmt.Sprintf("zerofs-volume-%s", volumeID)
 
+	ownerRefs := []metav1.OwnerReference{}
 	// Get the DaemonSet UID for OwnerReference
 	daemonSetUID, err := m.getDaemonSetUID(ctx)
 	if err != nil {
-		m.logger.Warnf("Failed to get DaemonSet UID, continuing without it: %v", err)
+		m.logger.Warnf("Failed to get DaemonSet UID; per-volume pods will not be owned by the DaemonSet: %v", err)
+	} else if daemonSetUID != "" {
+		ownerRefs = append(ownerRefs, metav1.OwnerReference{
+			APIVersion:         "apps/v1",
+			Kind:               "DaemonSet",
+			Name:               "zerofs-csi-node",
+			UID:                daemonSetUID,
+			Controller:         ptr.To(true),
+			BlockOwnerDeletion: ptr.To(true),
+		})
 	}
 
 	pod := &corev1.Pod{
@@ -200,14 +212,7 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 				"type":   "volume",
 				"volume": volumeID,
 			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "DaemonSet",
-					Name:       "zerofs-csi-node",
-					UID:        daemonSetUID,
-				},
-			},
+			OwnerReferences: ownerRefs,
 		},
 		Spec: corev1.PodSpec{
 			NodeName:                      nodeName,
@@ -226,7 +231,7 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 					Env: []corev1.EnvVar{
 						{
 							Name:  "RUST_LOG",
-							Value: "zerofs=debug,slatedb=debug",
+							Value: cmp.Or(configMapData["rustLog"], "zerofs=debug,slatedb=debug"),
 						},
 					},
 					VolumeMounts: []corev1.VolumeMount{
@@ -338,8 +343,12 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 	} else {
 		// If found, check if it's on the correct node
 		if existingPod.Spec.NodeName == nodeName {
-			// Pod is already on the correct node, skip creation
-			m.logger.Infof("Pod %s already exists on correct node %s for volume %s, skipping creation", podName, nodeName, volumeID)
+			// Pod is already on the correct node. Wait for readiness to avoid racing NodePublish mounts.
+			m.logger.Infof("Pod %s already exists on correct node %s for volume %s; waiting for readiness", podName, nodeName, volumeID)
+			if err := m.waitForPodReady(podName, m.namespace, 30*time.Second); err != nil {
+				return fmt.Errorf("pod exists but failed to become ready: %w", err)
+			}
+			m.logger.Infof("Pod %s is ready for volume %s", podName, volumeID)
 			return nil
 		} else {
 			// Pod exists but is on wrong node, delete it and create a new one
@@ -436,19 +445,38 @@ func (m *zerofsMounter) RemovePod(ctx context.Context, volumeID string) error {
 
 	podName := fmt.Sprintf("zerofs-volume-%s", volumeID)
 
-	// Delete the pod
-	if err := m.client.Delete(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: m.namespace,
-		},
-	}); err != nil {
-		// Check if the error is because the pod doesn't exist
+	// Delete the pod (bounded), then escalate to force delete if it's stuck terminating.
+	var pod corev1.Pod
+	if err := m.client.Get(ctx, types.NamespacedName{Namespace: m.namespace, Name: podName}, &pod); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			m.logger.Infof("Pod %s does not exist, skipping deletion", podName)
 		} else {
-			m.logger.Warnf("Failed to delete pod %s: %v", podName, err)
-			return fmt.Errorf("failed to delete pod: %w", err)
+			m.logger.Warnf("Failed to get pod %s: %v", podName, err)
+		}
+	} else {
+		if err := m.client.Delete(ctx, &pod); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				m.logger.Infof("Pod %s does not exist, skipping deletion", podName)
+			} else {
+				m.logger.Warnf("Failed to delete pod %s: %v", podName, err)
+				return fmt.Errorf("failed to delete pod: %w", err)
+			}
+		} else {
+			if err := m.waitForPodDeletion(podName, m.namespace, 45*time.Second); err != nil {
+				m.logger.Warnf("Pod %s did not delete within timeout; attempting force delete: %v", podName, err)
+				zero := int64(0)
+				background := metav1.DeletePropagationBackground
+				forceCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				forcePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: m.namespace}}
+				if delErr := m.client.Delete(forceCtx, forcePod, &client.DeleteOptions{
+					GracePeriodSeconds: &zero,
+					PropagationPolicy:  &background,
+				}); delErr != nil && !strings.Contains(delErr.Error(), "not found") {
+					m.logger.Warnf("Force delete for pod %s failed: %v", podName, delErr)
+				}
+				_ = m.waitForPodDeletion(podName, m.namespace, 30*time.Second)
+			}
 		}
 	}
 

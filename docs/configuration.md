@@ -33,8 +33,29 @@ Example:
 parameters:
   filesystem: btrfs
   configMapName: zerofs-btrfs-config
+  deleteDataOnPVCDelete: "false"
 mountOptions:
   - compress-force=zstd
 ```
 
 Supported filesystems depend on what `mkfs.*` tools are available in the driver container. The `validation/` configs currently exercise `btrfs` and `ext4`.
+
+### `deleteDataOnPVCDelete` (optional)
+
+If set to `"true"`, the controller will attempt to delete the S3 prefix for the volume during `DeleteVolume`.
+
+Notes:
+- This is **off by default** in `validation/` (`"false"`).
+- The prefix is computed as: `storageURL` + `/<volumeID>` (same layout used by the per-volume ZeroFS config).
+- Deletion errors cause `DeleteVolume` to fail (so Kubernetes will retry).
+
+### `rustLog` (optional)
+
+The per-volume ZeroFS pod can be configured with a custom `RUST_LOG` value via the config `ConfigMap`:
+
+```yaml
+data:
+  rustLog: "zerofs=info,slatedb=info"
+```
+
+This can be useful when investigating fencing/restart issues or reducing log volume in production.

@@ -29,6 +29,46 @@ type nodeService struct {
 	nbdMu sync.Mutex
 }
 
+func (ns *nodeService) reconcileOrphanedNBDDevices(ctx context.Context) {
+	// Keep this best-effort and non-blocking: we don't want startup reconciliation to prevent the node plugin from serving.
+	ns.logger.Infof("Running startup NBD reconciler (best-effort)")
+
+	devices, err := listNBDDevices()
+	if err != nil {
+		ns.logger.Warnf("Failed to list /dev/nbd* devices: %v", err)
+		return
+	}
+
+	detached := 0
+	skippedMounted := 0
+	for _, dev := range devices {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		connected, err := isNBDConnected(dev)
+		if err != nil || !connected {
+			continue
+		}
+
+		// If mounted anywhere, leave it alone (it's in use by a workload).
+		cmd := exec.Command("findmnt", "-n", "-S", dev)
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) != "" {
+			skippedMounted++
+			continue
+		}
+
+		ns.logger.Warnf("Detaching orphaned NBD device %s (connected but not mounted)", dev)
+		detachNBDDeviceBestEffort(ns.logger, dev)
+		detached++
+	}
+
+	ns.logger.Infof("Startup NBD reconciler complete: detached=%d skipped_mounted=%d", detached, skippedMounted)
+}
+
 // NodeStageVolume implements NodeServer
 func (ns *nodeService) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	ns.logger.Infof("NodeStageVolume called: %s", req.VolumeId)
@@ -64,17 +104,21 @@ func (ns *nodeService) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnsta
 // NodePublishVolume implements NodeServer
 func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	ns.logger.Infof("NodePublishVolume called: %s", req.VolumeId)
+	opTimer := startStage("node_publish", "total")
 
 	// Validate request
 	if req.VolumeId == "" {
+		recordStageError("node_publish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "volume ID cannot be empty")
 	}
 
 	if req.TargetPath == "" {
+		recordStageError("node_publish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "target path cannot be empty")
 	}
 
 	if req.VolumeCapability == nil {
+		recordStageError("node_publish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "volume capability cannot be empty")
 	}
 
@@ -84,6 +128,7 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	filesystem, exists := req.VolumeContext["filesystem"]
 	if !exists {
 		ns.logger.Errorf("Failed to determine filesystem for volume, ensure filesystem is specified")
+		recordStageError("node_publish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "failed to determine filesystem for volume, ensure filesystem is specified")
 	}
 
@@ -91,6 +136,7 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	if src, mounted := findMountSource(req.TargetPath); mounted {
 		if strings.HasPrefix(src, "/dev/nbd") {
 			ns.logger.Infof("Target path %s is already mounted from %s for volume %s; returning success", req.TargetPath, src, volumeID)
+			opTimer.observe()
 			return &csi.NodePublishVolumeResponse{}, nil
 		}
 		// Recover from a partially-failed attempt (e.g. lingering 9p mount).
@@ -133,20 +179,25 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	// Create the target directory if it doesn't exist
 	if err := os.MkdirAll(req.TargetPath, 0755); err != nil {
 		ns.logger.Errorf("Failed to create target directory %s: %v", req.TargetPath, err)
+		recordStageError("node_publish", "mkdir")
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to create target directory: %v", err))
 	}
 
 	configMapName, exists := req.VolumeContext["configMapName"]
 	if !exists {
 		ns.logger.Errorf("Failed to determine configMapName for volume, ensure configMapName is specified")
+		recordStageError("node_publish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "failed to determine configMapName for volume, ensure configMapName is specified")
 	}
 
 	// Create pod for the zerofs server
+	stage := startStage("node_publish", "create_pod")
 	if err := ns.mounter.CreatePod(ctx, volumeID, nodeName, configMapName); err != nil {
 		ns.logger.Errorf("Failed to create pod for volume %s: %v", volumeID, err)
+		recordStageError("node_publish", "create_pod")
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to create pod: %v", err))
 	}
+	stage.observe()
 
 	socketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.9p.sock", volumeID))
 	nbdSocketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.nbd.sock", volumeID))
@@ -171,15 +222,18 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		} else {
 			// Some other error occurred when checking file
 			ns.logger.Errorf("Error checking socket file: %v", err)
+			recordStageError("node_publish", "wait_socket")
 			return nil, status.Error(codes.Internal, fmt.Sprintf("error checking socket file: %v", err))
 		}
 
 		// If we reach here, it means we've exhausted retries and socket still doesn't exist
 		ns.logger.Errorf("Socket file still does not exist after %d attempts: %s", maxRetries, socketPath)
 
+		recordStageError("node_publish", "wait_socket")
 		return nil, status.Error(codes.Internal, fmt.Sprintf("socket file does not exist after %d attempts: %s", maxRetries, socketPath))
 	}
 
+	stage = startStage("node_publish", "mount_9p")
 	cmd := exec.Command("mount", "-t", "9p", "-o", "trans=unix,version=9p2000.L", socketPath, req.TargetPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -188,11 +242,13 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 			ns.logger.Warnf("9p mount returned error, but target %s is mounted from %s; continuing. err=%v output=%s", req.TargetPath, src, err, strings.TrimSpace(string(output)))
 		} else {
 			ns.logger.Errorf("Failed to mount volume %s to %s: %v, output: %s", volumeID, req.TargetPath, err, string(output))
+			recordStageError("node_publish", "mount_9p")
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to mount volume: %v", err))
 		}
 	} else {
 		ns.logger.Infof("Volume %s mounted successfully using 9p protocol", volumeID)
 	}
+	stage.observe()
 
 	// we need to make an nbd volume with the filesystem provided
 	ns.logger.Infof("Creating NBD volume with filesystem: %s", filesystem)
@@ -211,12 +267,15 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		}
 
 		ns.logger.Infof("Creating disk file with size: %s", capacityBytes)
+		stage = startStage("node_publish", "create_disk")
 		cmd := exec.Command("truncate", "-s", capacityBytes, diskFilePath)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			ns.logger.Errorf("Failed to create disk file %s: %v, output: %s", diskFilePath, err, string(output))
+			recordStageError("node_publish", "create_disk")
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to create disk file: %v", err))
 		}
+		stage.observe()
 
 		ns.logger.Infof("Successfully created disk file at %s with size %s", diskFilePath, capacityBytes)
 	} else if err != nil {
@@ -227,12 +286,15 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	}
 
 	// we no longer need the 9p filesystem, as we have a disk we can mount via nbd instead
+	stage = startStage("node_publish", "umount_9p")
 	cmd = exec.Command("umount", req.TargetPath)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		ns.logger.Errorf("Failed to unmount 9p volume %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
+		recordStageError("node_publish", "umount_9p")
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to unmount 9p volume: %v", err))
 	}
+	stage.observe()
 
 	// Check if we already have a tracking file with an NBD device path
 	var nbdDevicePath string
@@ -241,10 +303,12 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	ns.nbdMu.Unlock()
 	if err != nil {
 		ns.logger.Errorf("Failed to reserve an NBD device for volume %s: %v", volumeID, err)
+		recordStageError("node_publish", "reserve_nbd")
 		return nil, status.Error(codes.ResourceExhausted, fmt.Sprintf("failed to reserve NBD device: %v", err))
 	}
 
 	// Connect to the NBD server using an explicit device to avoid parsing output and leaking connections.
+	stage = startStage("node_publish", "connect_nbd")
 	cmd = exec.Command("nbd-client", "-unix", nbdSocketPath, "-N", "disk", "-persist", "-timeout", "0", "-connections", "4", nbdDevicePath)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
@@ -253,8 +317,10 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		ns.nbdMu.Lock()
 		clearVolumeNBDState(volumeID, nbdDevicePath)
 		ns.nbdMu.Unlock()
+		recordStageError("node_publish", "connect_nbd")
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to connect to NBD device: %v output: %s", err, string(output)))
 	}
+	stage.observe()
 
 	// Check if the device already has a filesystem
 	ns.logger.Infof("Checking if NBD device %s already has a filesystem", nbdDevicePath)
@@ -271,17 +337,20 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		ns.logger.Infof("Formatting NBD device %s with filesystem: %s", nbdDevicePath, filesystem)
 
 		mkfsCmd, mkfsArgs := mkfsCommand(filesystem, nbdDevicePath)
+		stage = startStage("node_publish", "mkfs")
 		cmd = exec.Command(mkfsCmd, mkfsArgs...)
 		output, err = cmd.CombinedOutput()
 		if err != nil {
 			// Cleanup NBD device on failure
 			ns.logger.Errorf("Failed to format NBD device %s: %v, output: %s. Disconnecting NBD...", nbdDevicePath, err, string(output))
+			recordStageError("node_publish", "mkfs")
 			cleanupCmd := exec.Command("nbd-client", "-d", nbdDevicePath)
 			if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
 				ns.logger.Warnf("Failed to disconnect NBD device %s during cleanup: %v", nbdDevicePath, cleanupErr)
 			}
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to format NBD device: %v, output: %s", err, strings.TrimSpace(string(output))))
 		}
+		stage.observe()
 		ns.logger.Infof("Successfully formatted NBD device %s with filesystem %s", nbdDevicePath, filesystem)
 
 	}
@@ -305,34 +374,41 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	mountArgs = append(mountArgs, nbdDevicePath, req.TargetPath)
 
 	cmd = exec.Command("mount", mountArgs...)
+	stage = startStage("node_publish", "mount_fs")
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		// Cleanup NBD device on failure
 		ns.logger.Errorf("Failed to mount NBD device %s to %s: %v, output: %s. Disconnecting NBD...", nbdDevicePath, req.TargetPath, err, string(output))
+		recordStageError("node_publish", "mount_fs")
 		cleanupCmd := exec.Command("nbd-client", "-d", nbdDevicePath)
 		if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
 			ns.logger.Warnf("Failed to disconnect NBD device %s during cleanup: %v", nbdDevicePath, cleanupErr)
 		}
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to mount NBD device: %v", err))
 	}
+	stage.observe()
 
 	ns.logger.Infof("Volume %s mounted successfully using NBD device %s", volumeID, nbdDevicePath)
 
 	published = true
 
+	opTimer.observe()
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
 // NodeUnpublishVolume implements NodeServer
 func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	ns.logger.Infof("NodeUnpublishVolume called: %s", req.VolumeId)
+	opTimer := startStage("node_unpublish", "total")
 
 	// Validate request
 	if req.VolumeId == "" {
+		recordStageError("node_unpublish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "volume ID cannot be empty")
 	}
 
 	if req.TargetPath == "" {
+		recordStageError("node_unpublish", "validate")
 		return nil, status.Error(codes.InvalidArgument, "target path cannot be empty")
 	}
 
@@ -349,6 +425,7 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	// Unmount the filesystem (always attempt unmount, even if findmnt failed)
 	ns.logger.Infof("Unmounting volume %s from %s", req.VolumeId, req.TargetPath)
 	cmd := exec.Command("umount", req.TargetPath)
+	stage := startStage("node_unpublish", "umount_fs")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// verify if it is actually unmounted
@@ -356,8 +433,10 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 			ns.logger.Infof("Volume %s already unmounted from %s", req.VolumeId, req.TargetPath)
 		} else {
 			ns.logger.Warnf("Failed to unmount volume %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
+			recordStageError("node_unpublish", "umount_fs")
 		}
 	}
+	stage.observe()
 
 	// Check /run/zerofs-csi/ for the NBD device if findmnt didn't return it
 	nbdDeviceFilePath := volumeNBDStatePath(req.VolumeId)
@@ -374,19 +453,25 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	if nbdDevice != "" {
 		ns.logger.Infof("Detaching volume %s from %s", req.VolumeId, nbdDevice)
 		cmd = exec.Command("nbd-client", "-d", nbdDevice)
+		stage = startStage("node_unpublish", "detach_nbd")
 		_, err = cmd.CombinedOutput()
 		if err != nil {
 			ns.logger.Warnf("Failed to detach nbd for volume %s: %v", req.VolumeId, err)
+			recordStageError("node_unpublish", "detach_nbd")
 		}
+		stage.observe()
 	} else {
 		ns.logger.Warnf("Skipping NBD detach for volume %s as device could not be determined", req.VolumeId)
 	}
 
 	// Remove pod for the zerofs server
+	stage = startStage("node_unpublish", "remove_pod")
 	if err := ns.mounter.RemovePod(ctx, req.VolumeId); err != nil {
 		ns.logger.Warnf("Failed to remove pod for volume %s: %v", req.VolumeId, err)
+		recordStageError("node_unpublish", "remove_pod")
 		// Continue with cleanup even if pod removal fails
 	}
+	stage.observe()
 
 	// Wait for pod deletion to complete before returning
 	podName := fmt.Sprintf("zerofs-volume-%s", req.VolumeId)
@@ -402,6 +487,7 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	ns.nbdMu.Unlock()
 
 	ns.logger.Infof("Volume %s unpublished successfully", req.VolumeId)
+	opTimer.observe()
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 

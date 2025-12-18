@@ -6,3 +6,4 @@ provisioner: zerofs.csi.driver
 parameters:
   filesystem: ext4
   configMapName: zerofs-external-config
+  deleteDataOnPVCDelete: "false"

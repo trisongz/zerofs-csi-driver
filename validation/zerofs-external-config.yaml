@@ -25,5 +25,6 @@ provisioner: zerofs.csi.driver
 parameters:
   filesystem: btrfs
   configMapName: zerofs-external-config
+  deleteDataOnPVCDelete: "false"
 mountOptions:
   - compress-force=zstd

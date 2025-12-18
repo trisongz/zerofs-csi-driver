@@ -55,13 +55,13 @@ See the [ZeroFS docs](https://www.zerofs.net) for more features in ZeroFS.
 - 9P support (run natively on 9P instead of a block device, if desirable)
 - Volume Expansion (ZeroFS itself [does not support this](https://www.zerofs.net/nbd-devices#managing-device-files)) but we might be able to do offline volume expansion (worst case copying all the data to a new, bigger file)
 - ReadWriteMany - while possible, this may not be desirable / useful today as the ZeroFS process would run as a single pod on one system. If that pod goes down all the clients are affected. There might be a way to make it HA with fencing and/or leader election in the future
-- Delete data from PVCs - right now deleting a PVC does not delete the data from S3. You will need to perform this action manually. Once there's sufficient test coverage I will revisit this
+- Safer data cleanup policies - `deleteDataOnPVCDelete` exists (opt-in) but production usage should include guardrails (scoped IAM, explicit bucket/prefix allowlist, and auditing)
 - Leader election - was having trouble getting it working alongside the various CSI sidecar pods
 
 ## Current Bugs
 
-- NBD exhaustion - addressed with: idempotent `NodePublishVolume`, explicit `/dev/nbd*` reservations, and cleanup on failed publishes. A regression harness exists to prevent reintroducing leaks: `make nbd-regression` / `make nbd-regression-chaos`.
-- Long terminating zerofs pvc pods - something must not be respecting `SIGTERM` or possibly taking too long, I haven't checked yet
+- NBD exhaustion - addressed with: idempotent `NodePublishVolume`, explicit `/dev/nbd*` reservations, cleanup on failed publishes, and a best-effort startup reconciler for connected-but-unmounted NBD devices. Regression harness: `make nbd-regression` / `make nbd-regression-chaos`.
+- Long terminating zerofs pvc pods - mitigated with bounded deletes and a force-delete fallback; still worth monitoring during `make soak`.
 - With HA Minio clusters I am seeing ZeroFS pods restart several times due to fencing errors. This is either a bug in ZeroFS, Minio, or my configuration
 
 ## Architecture
@@ -76,7 +76,7 @@ Once a filesystem has been established, it is mounted with `mount -t $filesystem
 
 On a volume detachment, we do the same steps in reverse: unmount the filesystem, disconnect the nbd device, delete the ZeroFS pod and `config.toml` `Secret`.
 
-The S3 data for deleted PVCs is not deleted at this time.
+By default, the S3 data for deleted PVCs is **not** deleted. You can opt into cleanup via the `StorageClass` parameter `deleteDataOnPVCDelete: "true"` (deletes the `storageURL/<volumeID>` prefix).
 
 ## Usage
 
@@ -111,6 +111,7 @@ provisioner: zerofs.csi.driver
 parameters:
   filesystem: btrfs
   configMapName: zerofs-btrfs-config
+  deleteDataOnPVCDelete: "false"
 mountOptions: compress-force=zstd # compress-force runs zstd compression regardless of btrfs heuristic results
 ```
 

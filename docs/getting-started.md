@@ -25,6 +25,20 @@ make bench
 make logs
 ```
 
+## Kustomize install (optional)
+
+To install the driver via Kustomize:
+
+```bash
+kubectl apply -k deploy/
+```
+
+To deploy the validation stack (MinIO + driver + StorageClass):
+
+```bash
+kubectl apply -k validation/
+```
+
 Artifacts:
 - `validation-logs.txt` (aggregated controller/node/benchmark logs)
 

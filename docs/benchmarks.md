@@ -49,6 +49,8 @@ Failure injection mode (deletes the per-volume ZeroFS pod mid-attach):
 ITERATIONS=50 make nbd-regression-chaos
 ```
 
+The node plugin also runs a best-effort **startup NBD reconciler**: it detaches devices that are *connected* but not *mounted*. This helps recover from abrupt restarts, but it will not touch mounted volumes.
+
 ## Collect logs
 
 ```bash

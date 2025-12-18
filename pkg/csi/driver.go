@@ -77,7 +77,11 @@ func (d *zeroFSDriver) Start(ctx context.Context) error {
 
 	if d.enableNode {
 		d.logger.Infof("Registering Node service")
-		csi.RegisterNodeServer(d.server, &nodeService{name: driverName, nodeID: d.nodeID, logger: d.logger, mounter: d.mounter})
+		ns := &nodeService{name: driverName, nodeID: d.nodeID, logger: d.logger, mounter: d.mounter}
+		csi.RegisterNodeServer(d.server, ns)
+
+		// Best-effort startup reconciliation for orphaned NBD devices.
+		go ns.reconcileOrphanedNBDDevices(ctx)
 	} else {
 		d.logger.Infof("Node service disabled")
 	}

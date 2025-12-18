@@ -54,6 +54,20 @@ func (cs *controllerService) DeleteVolume(ctx context.Context, req *csi.DeleteVo
 	if req.VolumeId == "" {
 		return nil, fmt.Errorf("volume ID cannot be empty")
 	}
+
+	// Best-effort: ensure no per-volume pod/secret remains.
+	if cs.mounter != nil {
+		if err := cs.mounter.RemovePod(ctx, req.VolumeId); err != nil {
+			cs.logger.Warnf("DeleteVolume: failed to remove per-volume pod/secret for %s: %v", req.VolumeId, err)
+		}
+	}
+
+	// Optional: S3 prefix cleanup gated by StorageClass parameter deleteDataOnPVCDelete=true.
+	if err := cs.deleteVolumeDataIfEnabled(ctx, req.VolumeId); err != nil {
+		cs.logger.Errorf("DeleteVolume: data cleanup failed for %s: %v", req.VolumeId, err)
+		return nil, fmt.Errorf("failed to delete volume data: %w", err)
+	}
+
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
