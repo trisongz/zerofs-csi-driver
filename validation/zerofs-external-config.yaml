@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zerofs-external-config
+  namespace: zerofs
+data:
+  awsAllowHTTP: "false"
+  awsCredentialsSecretName: halceon-s3-credentials
+  awsDefaultRegion: us-east-1
+  awsEndpoint: https://s3.halceon.io
+  storageURL: s3://zerofs-validation
+  encryptionPasswordSecretName: zerofs-encryption-password
+  cacheDiskSizeGB: "1.0"
+  cacheMemorySizeGB: "0.5"
+  zerofsImage: "ghcr.io/barre/zerofs:0.22.4"
+  lsmL0MaxSsts: "16"
+  lsmMaxUnflushedGB: "0.1"
+  filesystemMaxSizeGB: "10.0"
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: zerofs-external
+provisioner: zerofs.csi.driver
+parameters:
+  filesystem: btrfs
+  configMapName: zerofs-external-config
+mountOptions:
+  - compress-force=zstd

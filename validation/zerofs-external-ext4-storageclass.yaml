@@ -1,0 +1,8 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: zerofs-external-ext4
+provisioner: zerofs.csi.driver
+parameters:
+  filesystem: ext4
+  configMapName: zerofs-external-config

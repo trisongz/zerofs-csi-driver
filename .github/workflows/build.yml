@@ -15,26 +15,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      - name: Repo metadata
-        id: repo
-        uses: actions/github-script@v7
-        with:
-          script: |
-            return context.repo.repo
       - name: Prepare
         id: prep
         run: |
-          DOCKER_IMAGE=ghcr.io/jrcichra/zerofs-csi-driver
+          set -euo pipefail
+          DOCKER_IMAGE=halceon/zerofs-csi-driver
+
           VERSION=noop
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            VERSION=nightly
-          elif [[ $GITHUB_REF == refs/tags/* ]]; then
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           elif [[ $GITHUB_REF == refs/heads/* ]]; then
-            VERSION=$(echo ${GITHUB_REF#refs/heads/} | sed -r 's#/+#-#g')
-            if [ "${{ github.event.repository.default_branch }}" = "$VERSION" ]; then
-              VERSION=latest
-            fi
+            # This workflow only runs on main pushes; treat it as latest.
+            VERSION=latest
           elif [[ $GITHUB_REF == refs/pull/* ]]; then
             VERSION=pr-${{ github.event.number }}
           fi
@@ -46,9 +38,9 @@ jobs:
           elif [ "${{ github.event_name }}" = "push" ]; then
             TAGS="$TAGS,${DOCKER_IMAGE}:sha-${GITHUB_SHA::8}"
           fi
-          echo ::set-output name=version::${VERSION}
-          echo ::set-output name=tags::${TAGS}
-          echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tags=${TAGS}" >> "${GITHUB_OUTPUT}"
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -63,13 +55,13 @@ jobs:
       - name: Set up Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: '^1.25'
-      - name: Login to GitHub Container Registry
+          go-version: '1.25.x'
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Build binaries for all platforms
         run: |
           # Create output directory
@@ -88,11 +80,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.prep.outputs.tags }}
           labels: |
-            org.opencontainers.image.title=${{ fromJson(steps.repo.outputs.result).name }}
-            org.opencontainers.image.description=${{ fromJson(steps.repo.outputs.result).description }}
-            org.opencontainers.image.url=${{ fromJson(steps.repo.outputs.result).html_url }}
-            org.opencontainers.image.source=${{ fromJson(steps.repo.outputs.result).clone_url }}
+            org.opencontainers.image.title=zerofs-csi-driver
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.prep.outputs.version }}
             org.opencontainers.image.created=${{ steps.prep.outputs.created }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}

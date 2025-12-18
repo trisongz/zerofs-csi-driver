@@ -239,8 +239,8 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		// No filesystem found, proceed with formatting
 		ns.logger.Infof("Formatting NBD device %s with filesystem: %s", nbdDevicePath, filesystem)
 
-		// Use mkfs to format the device
-		cmd = exec.Command("mkfs", "-t", filesystem, nbdDevicePath)
+		mkfsCmd, mkfsArgs := mkfsCommand(filesystem, nbdDevicePath)
+		cmd = exec.Command(mkfsCmd, mkfsArgs...)
 		output, err = cmd.CombinedOutput()
 		if err != nil {
 			// Cleanup NBD device on failure
@@ -249,7 +249,7 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 			if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
 				ns.logger.Warnf("Failed to disconnect NBD device %s during cleanup: %v", nbdDevicePath, cleanupErr)
 			}
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to format NBD device: %v", err))
+			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to format NBD device: %v, output: %s", err, strings.TrimSpace(string(output))))
 		}
 		ns.logger.Infof("Successfully formatted NBD device %s with filesystem %s", nbdDevicePath, filesystem)
 
@@ -493,6 +493,21 @@ func parseNBDDevice(output string) (string, error) {
 		return m[1], nil
 	}
 	return "", fmt.Errorf("could not find nbd device")
+}
+
+func mkfsCommand(filesystem, devicePath string) (string, []string) {
+	fs := strings.ToLower(strings.TrimSpace(filesystem))
+	switch fs {
+	case "btrfs":
+		return "mkfs.btrfs", []string{"-f", devicePath}
+	case "xfs":
+		return "mkfs.xfs", []string{"-f", devicePath}
+	case "ext2", "ext3", "ext4":
+		// e2fsprogs uses -F to force on block devices
+		return "mkfs." + fs, []string{"-F", devicePath}
+	default:
+		return "mkfs", []string{"-t", fs, devicePath}
+	}
 }
 
 // NodeGetInfo implements NodeServer

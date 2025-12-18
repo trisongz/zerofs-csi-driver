@@ -1,0 +1,164 @@
+name: zerofs-upstream
+
+on:
+  schedule:
+    # Weekly (Monday 03:00 UTC)
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "^1.25"
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.5"
+
+      - name: Install k3d
+        uses: k3d-io/setup-k3d-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine latest ZeroFS release
+        id: zerofs
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+          tag="$(curl -fsSL https://api.github.com/repos/Barre/ZeroFS/releases/latest | jq -r .tag_name)"
+          if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+            echo "Failed to determine latest ZeroFS release tag" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
+          echo "Latest ZeroFS release: ${tag}"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compare with currently configured ZeroFS version
+        id: compare
+        run: |
+          set -euo pipefail
+          latest="${{ steps.zerofs.outputs.version }}"
+          current="$(grep -E '^[[:space:]]*zerofsImage:' validation/zerofs-config.yaml | head -n 1 | sed -E 's/.*zerofs:([^\" ]+).*/\\1/')"
+          if [ -z "${current}" ]; then
+            echo "Failed to detect current zerofsImage version from validation/zerofs-config.yaml" >&2
+            exit 1
+          fi
+          echo "current=${current}" >> "${GITHUB_OUTPUT}"
+          echo "latest=${latest}" >> "${GITHUB_OUTPUT}"
+          if [ "${latest}" = "${current}" ]; then
+            echo "new_release=false" >> "${GITHUB_OUTPUT}"
+            echo "No new ZeroFS release (current=${current}, latest=${latest}); skipping."
+          else
+            echo "new_release=true" >> "${GITHUB_OUTPUT}"
+            echo "New ZeroFS release detected (current=${current}, latest=${latest})."
+          fi
+
+      - name: Check if driver image for this ZeroFS release already exists
+        id: image
+        if: steps.compare.outputs.new_release == 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.zerofs.outputs.tag }}"
+          if docker manifest inspect "halceon/zerofs-csi-driver:${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "Image halceon/zerofs-csi-driver:${tag} already exists; skipping."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Clone ZeroFS release
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.zerofs.outputs.tag }}"
+          git clone --depth 1 --branch "${tag}" https://github.com/Barre/ZeroFS /tmp/ZeroFS
+          git -C /tmp/ZeroFS rev-parse HEAD
+
+      - name: Build linux/amd64 driver binary
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v -o out/zerofs-csi-driver-linux-amd64 ./cmd/driver
+
+      - name: Build and push driver images
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.zerofs.outputs.tag }}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            -t "halceon/zerofs-csi-driver:${tag}" \
+            -t "halceon/zerofs-csi-driver:latest" \
+            -f Dockerfile \
+            .
+          docker push "halceon/zerofs-csi-driver:${tag}"
+          docker push "halceon/zerofs-csi-driver:latest"
+
+      - name: Enable NBD on host
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          sudo modprobe nbd max_part=100
+          ls -l /dev/nbd0
+
+      - name: Create k3d cluster + deploy MinIO
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          make setup-infra CLUSTER_NAME=zerofs-test
+          kubectl config current-context
+          kubectl get nodes -o wide
+
+      - name: Deploy driver (version tag) + set ZeroFS runtime image
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.zerofs.outputs.tag }}"
+          version="${{ steps.zerofs.outputs.version }}"
+
+          make deploy CLUSTER_NAME=zerofs-test IMAGE_NAME="halceon/zerofs-csi-driver:${tag}"
+
+          # Ensure the in-cluster ZeroFS config uses the new upstream release image.
+          kubectl -n zerofs patch configmap zerofs-btrfs-config --type merge \
+            -p "{\"data\":{\"zerofsImage\":\"ghcr.io/barre/zerofs:${version}\"}}"
+
+      - name: Run validation (internal MinIO)
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          make test
+          make logs
+
+      - name: Upload validation logs
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-logs-${{ steps.zerofs.outputs.tag }}
+          path: |
+            validation-logs.txt
+
+      - name: Teardown cluster
+        if: always()
+        run: |
+          k3d cluster delete zerofs-test || true

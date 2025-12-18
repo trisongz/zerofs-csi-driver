@@ -20,20 +20,22 @@ spec:
   restartPolicy: Never
   containers:
   - name: fio
-    image: xinnux/fio
-    command: ["fio"]
+    image: alpine:3.22.2
+    command: ["sh", "-lc"]
     args:
-    - "--name=benchtest"
-    - "--size=512m"
-    - "--filename=/data/testfile"
-    - "--rw=randrw"
-    - "--rwmixread=50"
-    - "--bs=4k"
-    - "--direct=1"
-    - "--numjobs=1"
-    - "--time_based"
-    - "--runtime=30"
-    - "--group_reporting"
+    - |
+      apk add --no-cache fio >/dev/null
+      fio --name=benchtest \
+        --size=512m \
+        --filename=/data/testfile \
+        --rw=randrw \
+        --rwmixread=50 \
+        --bs=4k \
+        --direct=1 \
+        --numjobs=1 \
+        --time_based \
+        --runtime=30 \
+        --group_reporting
     volumeMounts:
     - name: data
       mountPath: /data

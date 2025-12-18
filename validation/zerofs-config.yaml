@@ -29,7 +29,7 @@ data:
   encryptionPasswordSecretName: zerofs-encryption-password
   cacheDiskSizeGB: "0.5"
   cacheMemorySizeGB: "0.2"
-  zerofsImage: "ghcr.io/barre/zerofs:0.22.1"
+  zerofsImage: "ghcr.io/barre/zerofs:0.22.4"
   # New config options we added
   lsmL0MaxSsts: "16"
   lsmMaxUnflushedGB: "0.1"

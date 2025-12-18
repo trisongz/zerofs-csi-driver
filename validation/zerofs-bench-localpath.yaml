@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localpath-bench-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: localpath-bench
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: halceon/zerofs-bench:latest
+          imagePullPolicy: Never
+          args:
+            - run
+            - -d
+            - /data/bench_workspace
+            - -n
+            - "10000"
+            - -s
+            - "4096"
+            - -f
+            - csv
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: localpath-bench-pvc
+

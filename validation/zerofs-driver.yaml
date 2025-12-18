@@ -1,3 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zerofs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zerofs-csi-driver
+  namespace: zerofs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zerofs-csi-driver
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumes", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments", "volumeattachments/status", "csinodes"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zerofs-csi-driver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zerofs-csi-driver
+subjects:
+  - kind: ServiceAccount
+    name: zerofs-csi-driver
+    namespace: zerofs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zerofs-csi-driver
+  namespace: zerofs
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zerofs-csi-driver
+  namespace: zerofs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zerofs-csi-driver
+subjects:
+  - kind: ServiceAccount
+    name: zerofs-csi-driver
+    namespace: zerofs
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: zerofs.csi.driver
+spec:
+  attachRequired: true
+  fsGroupPolicy: File
+  podInfoOnMount: true
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

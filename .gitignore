@@ -3,3 +3,10 @@ out/
 
 ZeroFS
 driver
+
+validation-logs.txt
+
+# Benchmark artifacts (generated locally; do not commit)
+fio-*-output*.txt
+*bench-output.csv
+*bench-external-output.csv

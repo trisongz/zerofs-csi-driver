@@ -13,6 +13,29 @@ This software is under heavy active development. Expect breaking changes. Do not
 - S3-compatible endpoint (e.g. Minio or AWS S3)
 - Kubernetes cluster with CSI support
 
+## Development & Validation
+
+This repo includes a manifest-driven validation harness under `validation/` and a `Makefile` to run it end-to-end.
+
+Key requirements:
+- NBD support on the host running k3d nodes (e.g. `sudo modprobe nbd max_part=100`)
+- Docker + `k3d` + `kubectl`
+
+Common commands:
+- `make setup-infra`: create a k3d cluster (`zerofs-test`) and deploy standalone MinIO
+- `make build`: build + push `halceon/zerofs-csi-driver:latest` for `linux/$(go env GOARCH)`
+- `make deploy`: import image into k3d and deploy the driver + `validation/zerofs-config.yaml`
+- `make test`: run the basic fio pod (`validation/fio.yaml`)
+- `make bench`: run the mirrored `ZeroFS/bench` suite (built locally and imported into k3d)
+- `make logs`: collect controller/node/bench logs into `validation-logs.txt`
+- `make teardown`: delete the k3d cluster
+
+External endpoint benchmarks:
+- `validation/zerofs-external-config.yaml`: example `StorageClass` that points at an external S3-compatible endpoint and references secrets by name (do not commit credentials)
+- `make test-external`: btrfs fio suite against `zerofs-external`
+- `make test-external-ext4`: ext4 fio suite against `zerofs-external-ext4`
+- `make soak`: long-running fio Job (`validation/fio-soak.yaml`)
+
 ## Features
 
 - Infinitely scalable block storage on Kubernetes
@@ -108,3 +131,8 @@ spec:
 ```
 
 Attach it to a pod to use it. See the `zerofs` namespace and `events` for troubleshooting.
+
+## CI Workflows
+
+- `.github/workflows/build.yml`: builds/pushes Docker images to Docker Hub (`halceon/zerofs-csi-driver`) on `main` and tag pushes.
+- `.github/workflows/zerofs-upstream.yaml`: weekly check for new `Barre/ZeroFS` releases; if a newer release is found, builds `halceon/zerofs-csi-driver:vX.Y.Z`, updates the in-cluster ZeroFS runtime image for validation, and runs `make test` against the internal MinIO deployment.
