@@ -10,6 +10,7 @@ This project is a Kubernetes CSI driver for [ZeroFS](https://www.zerofs.net/): i
 
 ## Quick links
 
+- 0 → 1 test run: [Quickstart](quickstart.md)
 - Start here: [Getting Started](getting-started.md)
 - Understand the flow: [Architecture](architecture.md)
 - Configure S3 + filesystem: [Configuration](configuration.md)
