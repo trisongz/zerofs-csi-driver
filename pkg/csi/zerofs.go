@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -60,6 +61,7 @@ func (m *zerofsMounter) CreatePod(ctx context.Context, volumeID, nodeName, confi
 		return fmt.Errorf("failed to get zerofs configmap: %w", err)
 	}
 	configMapData := configMap.Data
+	podReadyTimeout := m.podReadyTimeout(configMapData)
 
 	// Get the secret data for the encryption password
 	var encryptionPasswordSecret corev1.Secret
@@ -345,7 +347,7 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 		if existingPod.Spec.NodeName == nodeName {
 			// Pod is already on the correct node. Wait for readiness to avoid racing NodePublish mounts.
 			m.logger.Infof("Pod %s already exists on correct node %s for volume %s; waiting for readiness", podName, nodeName, volumeID)
-			if err := m.waitForPodReady(podName, m.namespace, 30*time.Second); err != nil {
+			if err := m.waitForPodReady(podName, m.namespace, podReadyTimeout); err != nil {
 				return fmt.Errorf("pod exists but failed to become ready: %w", err)
 			}
 			m.logger.Infof("Pod %s is ready for volume %s", podName, volumeID)
@@ -375,13 +377,29 @@ max_size_gb = {{.FilesystemMaxSizeGB}}
 	}
 
 	// Wait for pod to be ready
-	err = m.waitForPodReady(podName, m.namespace, 30*time.Second)
+	err = m.waitForPodReady(podName, m.namespace, podReadyTimeout)
 	if err != nil {
 		return fmt.Errorf("pod failed to become ready: %w", err)
 	}
 
 	m.logger.Infof("Pod created successfully for volume %s", volumeID)
 	return nil
+}
+
+func (m *zerofsMounter) podReadyTimeout(configMapData map[string]string) time.Duration {
+	// Needs to cover cold starts (image pull, slower nodes) and readiness probe delays.
+	const defaultSeconds = 120
+
+	raw := strings.TrimSpace(configMapData["podReadyTimeoutSeconds"])
+	if raw == "" {
+		return defaultSeconds * time.Second
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		m.logger.Warnf("Invalid podReadyTimeoutSeconds %q; using default %ds", raw, defaultSeconds)
+		return defaultSeconds * time.Second
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // waitForPodDeletion waits for a pod to be deleted

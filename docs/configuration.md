@@ -59,3 +59,12 @@ data:
 ```
 
 This can be useful when investigating fencing/restart issues or reducing log volume in production.
+
+### `podReadyTimeoutSeconds` (optional)
+
+The node plugin waits for the per-volume ZeroFS pod to become Ready (9P socket created) before proceeding with 9P/NBD setup. On slower clusters or cold starts, a longer timeout reduces first-attach flakes.
+
+```yaml
+data:
+  podReadyTimeoutSeconds: "120"
+```
