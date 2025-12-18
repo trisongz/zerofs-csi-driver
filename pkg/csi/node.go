@@ -6,9 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -25,6 +25,8 @@ type nodeService struct {
 	nodeID  string
 	logger  *logrus.Logger
 	mounter *zerofsMounter
+
+	nbdMu sync.Mutex
 }
 
 // NodeStageVolume implements NodeServer
@@ -76,14 +78,8 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		return nil, status.Error(codes.InvalidArgument, "volume capability cannot be empty")
 	}
 
+	volumeID := req.VolumeId
 	nodeName := ns.nodeID
-
-	// Get volume information from publish context
-
-	volumeId := ""
-	if val, exists := req.PublishContext["volumeId"]; exists {
-		volumeId = val
-	}
 
 	filesystem, exists := req.VolumeContext["filesystem"]
 	if !exists {
@@ -91,7 +87,48 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		return nil, status.Error(codes.InvalidArgument, "failed to determine filesystem for volume, ensure filesystem is specified")
 	}
 
-	ns.logger.Infof("Mounting volume %s to %s on node %s", volumeId, req.TargetPath, nodeName)
+	// Idempotency: if the target is already mounted from an NBD device, return success.
+	if src, mounted := findMountSource(req.TargetPath); mounted {
+		if strings.HasPrefix(src, "/dev/nbd") {
+			ns.logger.Infof("Target path %s is already mounted from %s for volume %s; returning success", req.TargetPath, src, volumeID)
+			return &csi.NodePublishVolumeResponse{}, nil
+		}
+		// Recover from a partially-failed attempt (e.g. lingering 9p mount).
+		ns.logger.Warnf("Target path %s is already mounted from %s for volume %s; attempting to unmount and retry", req.TargetPath, src, volumeID)
+		unmountBestEffort(ns.logger, req.TargetPath)
+	}
+
+	// Best-effort cleanup of stale NBD reservations from previous failed attempts.
+	ns.nbdMu.Lock()
+	if staleDev, ok := readVolumeNBDState(volumeID); ok {
+		if connected, err := isNBDConnected(staleDev); err == nil && connected {
+			ns.logger.Warnf("Found stale NBD state for volume %s pointing to %s; detaching before retry", volumeID, staleDev)
+			detachNBDDeviceBestEffort(ns.logger, staleDev)
+		}
+		clearVolumeNBDState(volumeID, staleDev)
+	}
+	ns.nbdMu.Unlock()
+
+	ns.logger.Infof("Mounting volume %s to %s on node %s", volumeID, req.TargetPath, nodeName)
+
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+
+		// Cleanup for failed publishes to avoid leaking NBD devices and per-volume pods.
+		unmountBestEffort(ns.logger, req.TargetPath)
+
+		if dev, ok := readVolumeNBDState(volumeID); ok {
+			detachNBDDeviceBestEffort(ns.logger, dev)
+			clearVolumeNBDState(volumeID, dev)
+		}
+
+		if err := ns.mounter.RemovePod(ctx, volumeID); err != nil {
+			ns.logger.Warnf("Failed to remove pod during failed publish cleanup for volume %s: %v", volumeID, err)
+		}
+	}()
 
 	// Create the target directory if it doesn't exist
 	if err := os.MkdirAll(req.TargetPath, 0755); err != nil {
@@ -106,13 +143,13 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	}
 
 	// Create pod for the zerofs server
-	if err := ns.mounter.CreatePod(ctx, volumeId, nodeName, configMapName); err != nil {
-		ns.logger.Errorf("Failed to create pod for volume %s: %v", volumeId, err)
+	if err := ns.mounter.CreatePod(ctx, volumeID, nodeName, configMapName); err != nil {
+		ns.logger.Errorf("Failed to create pod for volume %s: %v", volumeID, err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to create pod: %v", err))
 	}
 
-	socketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.9p.sock", volumeId))
-	nbdSocketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.nbd.sock", volumeId))
+	socketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.9p.sock", volumeID))
+	nbdSocketPath := filepath.Join(ZeroFSBaseDir, fmt.Sprintf("zerofs-%s.nbd.sock", volumeID))
 
 	// Add a retry loop to check for socket file existence before attempting mount
 	// This handles race conditions where the service might not have fully initialized
@@ -144,18 +181,17 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 	}
 
 	cmd := exec.Command("mount", "-t", "9p", "-o", "trans=unix,version=9p2000.L", socketPath, req.TargetPath)
-
-	// Check if the target path is already mounted
-	checkCmd := exec.Command("mountpoint", "-d", req.TargetPath)
-	if err := checkCmd.Run(); err == nil {
-		ns.logger.Infof("Volume %s is already mounted at %s, skipping mount", volumeId, req.TargetPath)
-	} else {
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			ns.logger.Errorf("Failed to mount volume %s to %s: %v, output: %s", volumeId, req.TargetPath, err, string(output))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// If it is already mounted (from a retry/partial attempt), continue rather than leaking NBD devices.
+		if src, mounted := findMountSource(req.TargetPath); mounted {
+			ns.logger.Warnf("9p mount returned error, but target %s is mounted from %s; continuing. err=%v output=%s", req.TargetPath, src, err, strings.TrimSpace(string(output)))
+		} else {
+			ns.logger.Errorf("Failed to mount volume %s to %s: %v, output: %s", volumeID, req.TargetPath, err, string(output))
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to mount volume: %v", err))
 		}
-		ns.logger.Infof("Volume %s mounted successfully using 9p protocol", volumeId)
+	} else {
+		ns.logger.Infof("Volume %s mounted successfully using 9p protocol", volumeID)
 	}
 
 	// we need to make an nbd volume with the filesystem provided
@@ -192,37 +228,32 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 
 	// we no longer need the 9p filesystem, as we have a disk we can mount via nbd instead
 	cmd = exec.Command("umount", req.TargetPath)
-	output, err := cmd.CombinedOutput()
+	output, err = cmd.CombinedOutput()
 	if err != nil {
 		ns.logger.Errorf("Failed to unmount 9p volume %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to unmount 9p volume: %v", err))
 	}
 
 	// Check if we already have a tracking file with an NBD device path
-	nbdDeviceFilePath := filepath.Join(ZeroFSRunDir, req.VolumeId)
 	var nbdDevicePath string
-	if _, err := os.Stat(nbdDeviceFilePath); err == nil {
-		// File exists, read the NBD device path from it
-		nbdDeviceBytes, err := os.ReadFile(nbdDeviceFilePath)
-		if err != nil {
-			ns.logger.Warnf("Failed to read existing NBD device file for volume %s: %v", req.VolumeId, err)
-		}
-		nbdDevicePath = string(nbdDeviceBytes)
-	} else {
-		// Connect to the NBD server using nbd-client
-		cmd = exec.Command("nbd-client", "-unix", nbdSocketPath, "-N", "disk", "-persist", "-timeout", "0", "-connections", "4")
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			ns.logger.Errorf("Failed to connect to NBD device: %v output: %s", err, string(output))
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to connect to NBD device: %v output: %s", err, string(output)))
-		}
+	ns.nbdMu.Lock()
+	nbdDevicePath, err = reserveNBDDevice(ns.logger, volumeID)
+	ns.nbdMu.Unlock()
+	if err != nil {
+		ns.logger.Errorf("Failed to reserve an NBD device for volume %s: %v", volumeID, err)
+		return nil, status.Error(codes.ResourceExhausted, fmt.Sprintf("failed to reserve NBD device: %v", err))
+	}
 
-		// parse out the device name we were assigned (/dev/nbd*)
-		nbdDevicePath, err = parseNBDDevice(string(output))
-		if err != nil {
-			ns.logger.Errorf("Failed to discover NBD device name: %v", err)
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to discover NBD device name: %v", err))
-		}
+	// Connect to the NBD server using an explicit device to avoid parsing output and leaking connections.
+	cmd = exec.Command("nbd-client", "-unix", nbdSocketPath, "-N", "disk", "-persist", "-timeout", "0", "-connections", "4", nbdDevicePath)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		ns.logger.Errorf("Failed to connect to NBD device %s: %v output: %s", nbdDevicePath, err, string(output))
+		// Clear reservation so retries can pick another device.
+		ns.nbdMu.Lock()
+		clearVolumeNBDState(volumeID, nbdDevicePath)
+		ns.nbdMu.Unlock()
+		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to connect to NBD device: %v output: %s", err, string(output)))
 	}
 
 	// Check if the device already has a filesystem
@@ -285,17 +316,9 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context, req *csi.NodePubli
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to mount NBD device: %v", err))
 	}
 
-	ns.logger.Infof("Volume %s mounted successfully using NBD device %s", volumeId, nbdDevicePath)
+	ns.logger.Infof("Volume %s mounted successfully using NBD device %s", volumeID, nbdDevicePath)
 
-	// Create the run directory if it doesn't exist
-	if err := os.MkdirAll(ZeroFSRunDir, 0755); err != nil {
-		ns.logger.Warnf("Failed to create run directory %s: %v", ZeroFSRunDir, err)
-	}
-
-	// Write the NBD device path to a file in /run/zerofs-csi/
-	if err := os.WriteFile(nbdDeviceFilePath, []byte(nbdDevicePath), 0644); err != nil {
-		ns.logger.Warnf("Failed to write NBD device file for volume %s: %v", volumeId, err)
-	}
+	published = true
 
 	return &csi.NodePublishVolumeResponse{}, nil
 }
@@ -317,18 +340,16 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	var nbdDevice string
 
 	// First try to find it via findmnt
-	cmd := exec.Command("findmnt", "-n", "-o", "SOURCE", req.TargetPath)
-	output, err := cmd.CombinedOutput()
-	if err == nil && len(output) > 0 {
-		nbdDevice = strings.TrimSpace(string(output))
+	if src, mounted := findMountSource(req.TargetPath); mounted {
+		nbdDevice = src
 	} else {
-		ns.logger.Warnf("Failed to find volume mount context for %s from %s: %v, output: %s", req.VolumeId, req.TargetPath, err, string(output))
+		ns.logger.Warnf("Failed to find volume mount context for %s from %s", req.VolumeId, req.TargetPath)
 	}
 
 	// Unmount the filesystem (always attempt unmount, even if findmnt failed)
 	ns.logger.Infof("Unmounting volume %s from %s", req.VolumeId, req.TargetPath)
-	cmd = exec.Command("umount", req.TargetPath)
-	output, err = cmd.CombinedOutput()
+	cmd := exec.Command("umount", req.TargetPath)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// verify if it is actually unmounted
 		if strings.Contains(string(output), "not mounted") {
@@ -339,10 +360,10 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	}
 
 	// Check /run/zerofs-csi/ for the NBD device if findmnt didn't return it
-	nbdDeviceFilePath := filepath.Join(ZeroFSRunDir, req.VolumeId)
+	nbdDeviceFilePath := volumeNBDStatePath(req.VolumeId)
 	if nbdDevice == "" {
 		if nbdDeviceBytes, err := os.ReadFile(nbdDeviceFilePath); err == nil {
-			nbdDevice = string(nbdDeviceBytes)
+			nbdDevice = strings.TrimSpace(string(nbdDeviceBytes))
 			ns.logger.Infof("Recovered NBD device %s from state file for volume %s", nbdDevice, req.VolumeId)
 		} else {
 			ns.logger.Warnf("Could not determine NBD device for volume %s (findmnt failed and state file missing/unreadable)", req.VolumeId)
@@ -376,14 +397,9 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnp
 	}
 
 	// Remove the tracking file from /run/zerofs-csi/
-	nbdDeviceFilePath = filepath.Join(ZeroFSRunDir, req.VolumeId)
-	if _, err := os.Stat(nbdDeviceFilePath); err == nil {
-		if removeErr := os.Remove(nbdDeviceFilePath); removeErr != nil {
-			ns.logger.Warnf("Failed to remove NBD device file for volume %s: %v", req.VolumeId, removeErr)
-		}
-	} else if !os.IsNotExist(err) {
-		ns.logger.Warnf("Error checking NBD device file for volume %s: %v", req.VolumeId, err)
-	}
+	ns.nbdMu.Lock()
+	clearVolumeNBDState(req.VolumeId, nbdDevice)
+	ns.nbdMu.Unlock()
 
 	ns.logger.Infof("Volume %s unpublished successfully", req.VolumeId)
 	return &csi.NodeUnpublishVolumeResponse{}, nil
@@ -484,15 +500,6 @@ func (ns *nodeService) NodeGetCapabilities(ctx context.Context, req *csi.NodeGet
 			},
 		},
 	}, nil
-}
-
-// parseNBDDevice extracts the NBD device path from nbd-client output
-func parseNBDDevice(output string) (string, error) {
-	re := regexp.MustCompile(`Connected (/dev/nbd\d+)`)
-	if m := re.FindStringSubmatch(output); len(m) > 1 {
-		return m[1], nil
-	}
-	return "", fmt.Errorf("could not find nbd device")
 }
 
 func mkfsCommand(filesystem, devicePath string) (string, []string) {

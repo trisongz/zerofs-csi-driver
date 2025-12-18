@@ -60,7 +60,7 @@ See the [ZeroFS docs](https://www.zerofs.net) for more features in ZeroFS.
 
 ## Current Bugs
 
-- NBD exhaustion - I've noticed at times `zerofs-csi-driver` can get in a loop and exhaust all the NBD mounts on a system. The code needs to be improved to handle this / be more idempotent
+- NBD exhaustion - mitigations added (idempotent `NodePublishVolume`, explicit `/dev/nbd*` reservations, and cleanup on failed publishes), but this still needs more soak coverage to be considered fully resolved
 - Long terminating zerofs pvc pods - something must not be respecting `SIGTERM` or possibly taking too long, I haven't checked yet
 - With HA Minio clusters I am seeing ZeroFS pods restart several times due to fencing errors. This is either a bug in ZeroFS, Minio, or my configuration
 
