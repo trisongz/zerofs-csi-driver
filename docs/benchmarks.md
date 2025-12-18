@@ -31,6 +31,24 @@ make soak
 
 The soak manifest is `validation/fio-soak.yaml` (defaults to `zerofs-test` and runs for 1 hour).
 
+## NBD leak regression (attach/detach)
+
+To prevent `/dev/nbd*` leaks on repeated kubelet retries and attach/detach cycles, the repo includes a regression harness that:
+- repeatedly mounts/unmounts a PVC on a single node
+- asserts the number of *connected* NBD devices returns to the baseline each iteration
+
+Run:
+
+```bash
+ITERATIONS=50 make nbd-regression
+```
+
+Failure injection mode (deletes the per-volume ZeroFS pod mid-attach):
+
+```bash
+ITERATIONS=50 make nbd-regression-chaos
+```
+
 ## Collect logs
 
 ```bash

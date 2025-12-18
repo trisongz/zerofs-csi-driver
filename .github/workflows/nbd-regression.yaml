@@ -1,0 +1,84 @@
+name: nbd-regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Number of attach/detach iterations"
+        required: false
+        default: "20"
+      chaos:
+        description: "Enable failure injection (delete per-volume ZeroFS pod mid-attach)"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  regression:
+    # Disabled by default on push/PR. Enable by either:
+    # - running workflow_dispatch, or
+    # - setting repository variable RUN_NBD_REGRESSION=true
+    if: github.event_name == 'workflow_dispatch' || vars.RUN_NBD_REGRESSION == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.5"
+
+      - name: Install k3d
+        uses: k3d-io/setup-k3d-action@v2
+
+      - name: Enable NBD on host
+        run: |
+          set -euo pipefail
+          sudo modprobe nbd max_part=100
+          ls -l /dev/nbd0
+
+      - name: Create k3d cluster + deploy MinIO
+        run: |
+          set -euo pipefail
+          make setup-infra CLUSTER_NAME=zerofs-test
+
+      - name: Build and deploy driver (local)
+        run: |
+          set -euo pipefail
+          make build-local IMAGE_NAME=halceon/zerofs-csi-driver:ci-nbd
+          make deploy IMAGE_NAME=halceon/zerofs-csi-driver:ci-nbd
+
+      - name: Run regression
+        env:
+          ITERATIONS: ${{ inputs.iterations || '20' }}
+          CHAOS: ${{ inputs.chaos && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          if [ "${CHAOS}" = "1" ]; then
+            ITERATIONS="${ITERATIONS}" make nbd-regression-chaos
+          else
+            ITERATIONS="${ITERATIONS}" make nbd-regression
+          fi
+          make logs
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nbd-regression-logs
+          path: |
+            validation-logs.txt
+
+      - name: Teardown cluster
+        if: always()
+        run: |
+          k3d cluster delete zerofs-test || true

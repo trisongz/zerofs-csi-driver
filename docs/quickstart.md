@@ -64,3 +64,4 @@ make teardown
 
 - Mirrored `ZeroFS/bench` suite: `make bench`
 - Long-running soak test: `make soak`
+- NBD leak regression: `ITERATIONS=20 make nbd-regression` (or `make nbd-regression-chaos`)

@@ -60,7 +60,7 @@ See the [ZeroFS docs](https://www.zerofs.net) for more features in ZeroFS.
 
 ## Current Bugs
 
-- NBD exhaustion - mitigations added (idempotent `NodePublishVolume`, explicit `/dev/nbd*` reservations, and cleanup on failed publishes), but this still needs more soak coverage to be considered fully resolved
+- NBD exhaustion - addressed with: idempotent `NodePublishVolume`, explicit `/dev/nbd*` reservations, and cleanup on failed publishes. A regression harness exists to prevent reintroducing leaks: `make nbd-regression` / `make nbd-regression-chaos`.
 - Long terminating zerofs pvc pods - something must not be respecting `SIGTERM` or possibly taking too long, I haven't checked yet
 - With HA Minio clusters I am seeing ZeroFS pods restart several times due to fencing errors. This is either a bug in ZeroFS, Minio, or my configuration
 

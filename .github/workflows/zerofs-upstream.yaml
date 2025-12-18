@@ -6,6 +6,10 @@ on:
     - cron: "0 3 * * 1"
   workflow_dispatch:
 
+env:
+  # Optional: set repository variable RUN_NBD_REGRESSION=true to enable.
+  RUN_NBD_REGRESSION: ${{ vars.RUN_NBD_REGRESSION }}
+
 jobs:
   build-and-validate:
     runs-on: ubuntu-latest
@@ -148,6 +152,13 @@ jobs:
         run: |
           set -euo pipefail
           make test
+          make logs
+
+      - name: Run NBD regression (optional)
+        if: steps.compare.outputs.new_release == 'true' && steps.image.outputs.exists != 'true' && env.RUN_NBD_REGRESSION == 'true'
+        run: |
+          set -euo pipefail
+          ITERATIONS=20 make nbd-regression-chaos
           make logs
 
       - name: Upload validation logs
