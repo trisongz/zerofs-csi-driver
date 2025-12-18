@@ -26,7 +26,7 @@ These fio jobs include a prefill step so later random reads don’t hit unwritte
 These numbers are **not a guarantee**. They are provided to set expectations and to help detect regressions. Your results will vary with S3 latency/throttling, node CPU/memory, and filesystem choice.
 
 Environment (example run on 2025-12-18):
-- k3d cluster, `https://s3.halceon.io`, bucket `s3://zerofs-validation`
+- k3d cluster, private S3-compatible endpoint (bucket redacted)
 - ZeroFS `ghcr.io/barre/zerofs:0.22.4`
 
 **Durability-sensitive fio (4k + fsync)** (higher is better, lower latency is better):

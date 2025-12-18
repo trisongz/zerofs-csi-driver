@@ -7,8 +7,8 @@ data:
   awsAllowHTTP: "false"
   awsCredentialsSecretName: halceon-s3-credentials
   awsDefaultRegion: us-east-1
-  awsEndpoint: https://s3.halceon.io
-  storageURL: s3://zerofs-validation
+  awsEndpoint: https://s3.example.com
+  storageURL: s3://your-bucket
   encryptionPasswordSecretName: zerofs-encryption-password
   cacheDiskSizeGB: "1.0"
   cacheMemorySizeGB: "0.5"
