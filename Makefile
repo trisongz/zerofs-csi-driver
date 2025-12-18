@@ -7,6 +7,7 @@ ZEROFSDIR ?= /shared/github/ZeroFS
 # Detect architecture for Go build (linux/amd64 or linux/arm64)
 ARCH ?= $(shell go env GOARCH)
 OS ?= $(shell go env GOOS)
+GOTOOLCHAIN ?= auto
 
 .PHONY: all
 all: run-validation
@@ -28,7 +29,7 @@ setup-infra:
 .PHONY: build
 build:
 	@echo "Building Go binary for linux/$(ARCH)..."
-	GOOS=linux GOARCH=$(ARCH) CGO_ENABLED=0 go build -v -o out/zerofs-csi-driver-linux-$(ARCH) ./cmd/driver
+	GOOS=linux GOARCH=$(ARCH) CGO_ENABLED=0 GOTOOLCHAIN=$(GOTOOLCHAIN) go build -v -o out/zerofs-csi-driver-linux-$(ARCH) ./cmd/driver
 	@echo "Building Docker image '$(IMAGE_NAME)'..."
 	docker buildx build --builder default --platform linux/$(ARCH) --load -t $(IMAGE_NAME) -f Dockerfile .
 	@echo "Pushing Docker image '$(IMAGE_NAME)'..."
@@ -38,7 +39,7 @@ build:
 .PHONY: build-local
 build-local:
 	@echo "Building Go binary for linux/$(ARCH)..."
-	GOOS=linux GOARCH=$(ARCH) CGO_ENABLED=0 go build -v -o out/zerofs-csi-driver-linux-$(ARCH) ./cmd/driver
+	GOOS=linux GOARCH=$(ARCH) CGO_ENABLED=0 GOTOOLCHAIN=$(GOTOOLCHAIN) go build -v -o out/zerofs-csi-driver-linux-$(ARCH) ./cmd/driver
 	@echo "Building Docker image '$(IMAGE_NAME)' (local load, no push)..."
 	docker buildx build --builder default --platform linux/$(ARCH) --load -t $(IMAGE_NAME) -f Dockerfile .
 	@echo "Docker image '$(IMAGE_NAME)' built (linux/$(ARCH))."
