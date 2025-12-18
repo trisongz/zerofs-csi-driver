@@ -9,7 +9,7 @@ kubectl -n zerofs logs -l app=zerofs-csi-controller --all-containers --tail=200
 kubectl get events --sort-by=.lastTimestamp | tail -n 50
 ```
 
-Metrics (Prometheus format):
+Metrics (Prometheus format) (see also [Metrics](metrics.md)):
 
 ```bash
 kubectl -n zerofs get pods -l app=zerofs-csi-node -o name

@@ -21,6 +21,30 @@ make test-external-ext4   # ext4  (zerofs-external-ext4)
 
 These fio jobs include a prefill step so later random reads don’t hit unwritten extents.
 
+## Reference results (external MinIO)
+
+These numbers are **not a guarantee**. They are provided to set expectations and to help detect regressions. Your results will vary with S3 latency/throttling, node CPU/memory, and filesystem choice.
+
+Environment (example run on 2025-12-18):
+- k3d cluster, `https://s3.halceon.io`, bucket `s3://zerofs-validation`
+- ZeroFS `ghcr.io/barre/zerofs:0.22.4`
+
+**Durability-sensitive fio (4k + fsync)** (higher is better, lower latency is better):
+
+| StorageClass | Job | Read IOPS | Write IOPS | p99 clat |
+|---|---|---:|---:|---:|
+| `zerofs-external` (btrfs) | `randread_4k_iodepth32` | ~335 | 0 | ~379ms |
+| `zerofs-external` (btrfs) | `randwrite_4k_fsync1` | 0 | ~24.8 | ~5.6ms |
+| `zerofs-external-ext4` (ext4) | `randread_4k_iodepth32` | ~1.5 | 0 | ~14.3s |
+| `zerofs-external-ext4` (ext4) | `randwrite_4k_fsync1` | 0 | ~0.18 | ~2.4s |
+
+**Soak (15 minutes)**: `randrw` 4k, `--fsync=16`, with a 2-minute injected S3 outage mid-run:
+- ~2.8 read IOPS / ~1.2 write IOPS, p99 clat ~3.7s
+
+Interpretation:
+- Filesystem choice matters. In this environment, `btrfs` was dramatically better than `ext4` for fsync-heavy IO.
+- Tail latency can spike into seconds during endpoint brownouts/outages (expected for durability-sensitive workloads on S3).
+
 ## Soak testing
 
 Use the long-running Job to catch tail-latency and stability issues:

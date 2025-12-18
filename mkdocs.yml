@@ -22,6 +22,7 @@ nav:
   - Getting Started: getting-started.md
   - Architecture: architecture.md
   - Configuration: configuration.md
+  - Metrics: metrics.md
   - Validation & Benchmarks: benchmarks.md
   - Operations: operations.md
   - CI & Releases: ci.md
