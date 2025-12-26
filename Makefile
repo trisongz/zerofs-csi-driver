@@ -122,26 +122,20 @@ bench: bench-image
 logs:
 	@echo "Collecting logs to validation-logs.txt..."
 	@echo "=== ZeroFS CSI Controller Logs ===" > validation-logs.txt
-	-kubectl logs -n zerofs -l app=zerofs-csi-controller --all-containers --tail=-1 >> validation-logs.txt 2>&1
+	@kubectl logs -n zerofs -l app=zerofs-csi-controller --all-containers --tail=-1 >> validation-logs.txt 2>&1 || true
 	@echo "\n=== ZeroFS CSI Node Logs ===" >> validation-logs.txt
-	-kubectl logs -n zerofs -l app=zerofs-csi-node --all-containers --tail=-1 >> validation-logs.txt 2>&1
+	@kubectl logs -n zerofs -l app=zerofs-csi-node --all-containers --tail=-1 >> validation-logs.txt 2>&1 || true
 	@echo "\n=== FIO Benchmark Logs/Describe ===" >> validation-logs.txt
-	-kubectl describe pod fio-benchmark >> validation-logs.txt 2>&1
-	-kubectl logs fio-benchmark >> validation-logs.txt 2>&1
+	@kubectl get pod fio-benchmark -n default >/dev/null 2>&1 && { kubectl describe pod fio-benchmark -n default >> validation-logs.txt 2>&1; kubectl logs fio-benchmark -n default >> validation-logs.txt 2>&1; } || echo "(fio-benchmark not found)" >> validation-logs.txt
 	@echo "\n=== External FIO Benchmark Logs/Describe ===" >> validation-logs.txt
-	-kubectl describe pod fio-external >> validation-logs.txt 2>&1
-	-kubectl logs fio-external >> validation-logs.txt 2>&1
+	@kubectl get pod fio-external -n default >/dev/null 2>&1 && { kubectl describe pod fio-external -n default >> validation-logs.txt 2>&1; kubectl logs fio-external -n default >> validation-logs.txt 2>&1; } || echo "(fio-external not found)" >> validation-logs.txt
 	@echo "\n=== External FIO (ext4) Logs/Describe ===" >> validation-logs.txt
-	-kubectl describe pod fio-external-ext4 >> validation-logs.txt 2>&1
-	-kubectl logs fio-external-ext4 >> validation-logs.txt 2>&1
+	@kubectl get pod fio-external-ext4 -n default >/dev/null 2>&1 && { kubectl describe pod fio-external-ext4 -n default >> validation-logs.txt 2>&1; kubectl logs fio-external-ext4 -n default >> validation-logs.txt 2>&1; } || echo "(fio-external-ext4 not found)" >> validation-logs.txt
 	@echo "\n=== Soak Job Logs/Describe ===" >> validation-logs.txt
-	-kubectl describe job fio-soak -n default >> validation-logs.txt 2>&1
-	-kubectl logs -n default job/fio-soak >> validation-logs.txt 2>&1
+	@kubectl get job fio-soak -n default >/dev/null 2>&1 && { kubectl describe job fio-soak -n default >> validation-logs.txt 2>&1; kubectl logs -n default job/fio-soak >> validation-logs.txt 2>&1; } || echo "(fio-soak not found)" >> validation-logs.txt
 	@echo "\n=== ZeroFS Bench Logs/Describe ===" >> validation-logs.txt
-	-kubectl describe job zerofs-bench -n default >> validation-logs.txt 2>&1
-	-kubectl logs -n default job/zerofs-bench >> validation-logs.txt 2>&1
-	-kubectl describe job zerofs-bench-external -n default >> validation-logs.txt 2>&1
-	-kubectl logs -n default job/zerofs-bench-external >> validation-logs.txt 2>&1
+	@kubectl get job zerofs-bench -n default >/dev/null 2>&1 && { kubectl describe job zerofs-bench -n default >> validation-logs.txt 2>&1; kubectl logs -n default job/zerofs-bench >> validation-logs.txt 2>&1; } || echo "(zerofs-bench not found)" >> validation-logs.txt
+	@kubectl get job zerofs-bench-external -n default >/dev/null 2>&1 && { kubectl describe job zerofs-bench-external -n default >> validation-logs.txt 2>&1; kubectl logs -n default job/zerofs-bench-external >> validation-logs.txt 2>&1; } || echo "(zerofs-bench-external not found)" >> validation-logs.txt
 	@echo "Logs exported to validation-logs.txt"
 
 .PHONY: nbd-regression
