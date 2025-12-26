@@ -30,7 +30,9 @@ jobs:
           version: "v1.31.5"
 
       - name: Install k3d
-        uses: k3d-io/setup-k3d-action@v2
+        uses: nolar/setup-k3d-k3s@v1
+        with:
+          skip-creation: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
